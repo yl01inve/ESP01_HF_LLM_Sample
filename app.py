@@ -1,130 +1,115 @@
 import os
 import sys
 import subprocess
+import uvicorn
 from typing import List, Dict, Any, Optional
 
-# --- 0. 內嵌模組安裝 ---
-# 警告: 這在許多託管環境中可能因權限不足而失敗。建議使用 requirements.txt。
+# --- Configuration ---
+MODEL_NAME = "Qwen3-0.6B-IQ4_XS.gguf"
+MODEL_REPO = "unsloth/Qwen3-0.6B-GGUF"
+AMD_SPACE_ID = "amd/gpt-oss-120b-chatbot" # Gradio Space ID for remote inference
+
+# --- 0. Dynamic Module Installation ---
+# WARNING: This may fail in many hosted environments due to permission issues.
+# A `requirements.txt` is generally recommended for production.
 
 def install_required_modules():
-    """使用 pip 在運行時安裝所有必要的 Python 模組，並強制啟用 AVX-512 編譯。"""
+    """
+    Installs necessary Python modules at runtime using pip,
+    forcing compilation with AVX-512 flags for llama-cpp-python.
+    """
     required_packages = [
-        "fastapi",
-        "uvicorn",
-        "pydantic",
-        "huggingface-hub",
-        "llama-cpp-python" 
+        "fastapi", "uvicorn", "pydantic", "huggingface-hub",
+        "llama-cpp-python", "gradio_client"
     ]
     
     # ----------------------------------------------------
-    # **核心修改處：設定 Llama.cpp 編譯選項**
+    # **Core Modification: Llama.cpp Compile Options**
     # ----------------------------------------------------
     compile_env = os.environ.copy()
-    
-    # 1. 強制使用 CMake
     compile_env["FORCE_CMAKE"] = "1"
-    
-    # 2. 設定 CMake 參數，啟用 AVX512 和 AVX512_VNNI
-    # 注意: 如果您的 CPU 不支援 AVX512，這將導致程式運行時錯誤 (Illegal instruction)。
-    # 推薦將其設為環境變數，例如 os.environ.get("LLAMA_COMPILER_FLAGS", "-DLLAMA_AVX512=ON -DLLAMA_AVX512_VNNI=ON")
+    # Note: If your CPU does not support AVX512, this will cause a runtime error (Illegal instruction).
     compile_env["CMAKE_ARGS"] = "-DLLAMA_AVX512=ON -DLLAMA_AVX512_VNNI=ON"
     # ----------------------------------------------------
 
-    print("--- 嘗試動態安裝/升級必要的 Python 模組 (啟用 AVX-512 編譯) ---")
+    print("--- Attempting Dynamic Installation/Upgrade (AVX-512 Compilation) ---")
     
     try:
-        subprocess.check_call([
-            sys.executable, 
-            "-m", 
-            "pip", 
-            "install", 
-            *required_packages, 
-            "--upgrade",
-            "--no-cache-dir", # 確保重新編譯
-            "--force-reinstall" # 確保重新編譯
-        ], 
-        # 將設定好的環境變數傳遞給 subprocess
-        env=compile_env)
-        
-        print("所有模組安裝/更新成功，llama-cpp-python 已使用 AVX-512 編譯。")
+        subprocess.check_call(
+            [
+                sys.executable, "-m", "pip", "install", 
+                *required_packages, 
+                "--upgrade", "--no-cache-dir", "--force-reinstall" # Ensure recompile
+            ], 
+            env=compile_env
+        )
+        print("All modules successfully installed/updated. llama-cpp-python compiled with AVX-512.")
     except subprocess.CalledProcessError as e:
-        print(f"**致命錯誤**：模組安裝失敗。錯誤訊息: {e}")
-        print("請檢查您的 CPU 是否支援 AVX-512，或嘗試移除 CMAKE_ARGS 環境變數。")
+        print(f"**FATAL ERROR**: Module installation failed. Error: {e}")
+        print("Check if your CPU supports AVX-512 or try removing the CMAKE_ARGS environment variable.")
         sys.exit(1)
     except Exception as e:
-        print(f"**致命錯誤**：發生未知錯誤。錯誤訊息: {e}")
+        print(f"**FATAL ERROR**: An unknown error occurred. Error: {e}")
         sys.exit(1)
 
 install_required_modules()
 
 
-# --- 1. 模組引入 (必須在安裝之後) ---
-
+# --- 1. Module Imports (Must be after installation) ---
 try:
-    # 引入 FastAPI 相關模組
     from pydantic import BaseModel, Field
     from fastapi import FastAPI, HTTPException
     from fastapi.responses import JSONResponse, HTMLResponse
     from fastapi.middleware.cors import CORSMiddleware
-    import uvicorn
-    
-    # 引入模型下載工具
     from huggingface_hub import hf_hub_download
-    
-    # 引入 Llama.cpp 模組
-    from llama_cpp import Llama, llama_print_system_info # 增加 system info 檢查
+    from llama_cpp import Llama, llama_print_system_info
+    from gradio_client import Client
 except ImportError as e:
-    print(f"**致命錯誤**：模組引入失敗。錯誤: {e}")
+    print(f"**FATAL ERROR**: Failed to import modules. Error: {e}")
     sys.exit(1)
 
-
-# --- 2. 模型設定與初始化 ---
-
-#MODEL_NAME = "Qwen3-0.6B-Q8_0.gguf"
-#MODEL_REPO = "Qwen/Qwen3-0.6B-GGUF"
-MODEL_NAME = "Qwen3-0.6B-IQ4_XS.gguf"
-MODEL_REPO = "unsloth/Qwen3-0.6B-GGUF"
-LLAMA_INSTANCE: Optional[Llama] = None # 全域 Llama 實例
+# --- 2. Global State ---
+LLAMA_INSTANCE: Optional[Llama] = None
 
 def initialize_llm():
-    """下載模型並初始化 Llama 實例"""
+    """Downloads the model and initializes the global Llama instance."""
     global LLAMA_INSTANCE
     
     if LLAMA_INSTANCE is not None:
         return
 
-    # 檢查 AVX-512 是否啟用
+    # Check AVX-512 status
     print("--- Llama.cpp System Info ---")
     print(llama_print_system_info())
     print("-----------------------------")
 
-
-    print(f"--- 1. 開始下載模型 {MODEL_NAME} ---")
+    print(f"--- 1. Starting model download: {MODEL_NAME} ---")
     try:
         model_path = hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_NAME)
     except Exception as e:
-        raise RuntimeError(f"無法下載模型: {e}")
+        raise RuntimeError(f"Failed to download model: {e}")
 
-    print("--- 2. 初始化 Llama.cpp 實例 ---")
+    print("--- 2. Initializing Llama.cpp instance ---")
     try:
+        # Use half of physical CPU cores for threads, minimum 1
+        n_threads = os.cpu_count() // 2 or 1
         LLAMA_INSTANCE = Llama(
             model_path=model_path,
             n_ctx=4096,
             n_batch=512,
-            n_threads=os.cpu_count() // 2 or 1,
+            n_threads=n_threads,
             n_gpu_layers=0,
             verbose=False
         )
-        print("Llama.cpp 模型加載成功。")
+        print("Llama.cpp model successfully loaded.")
     except Exception as e:
-        raise RuntimeError(f"Llama 實例初始化失敗: {e}")
+        raise RuntimeError(f"Llama instance initialization failed: {e}")
 
 
-# --- 3. FastAPI 設定與中介層 (Middleware) ---
-
+# --- 3. FastAPI Setup and Middleware ---
 app = FastAPI(
-    title="LLM 推論 API (Llama.cpp)",
-    description="直接使用 Llama.cpp 進行推論的 API 服務。"
+    title="LLM Inference API (Llama.cpp)",
+    description="API service for direct inference using Llama.cpp."
 )
 
 app.add_middleware(
@@ -135,16 +120,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# --- 4. Pydantic 請求模型 (僅保留極簡版) ---
-
+# --- 4. Pydantic Request Model ---
 class InferenceRequestMinimal(BaseModel):
-    """極簡推論請求的資料結構，僅接收問題。"""
-    question: str = Field(..., description="使用者輸入的問題或提示。")
+    """Data structure for a minimal inference request, accepting only a question."""
+    question: str = Field(..., description="The user's input question or prompt.")
 
 
-# --- 5. 推論核心函式 (非流式) ---
-
+# --- 5. Core Inference Function (Non-Streaming) ---
 def get_inference_response(
     messages: List[Dict[str, str]],
     system_message: str,
@@ -152,11 +134,11 @@ def get_inference_response(
     temperature: float = 0.7,
     top_p: float = 0.95,
 ) -> str:
-    """呼叫 Llama.cpp 實例並返回單一文字回應。"""
-
+    """Calls the Llama.cpp instance and returns a single text response."""
     if LLAMA_INSTANCE is None:
-        raise HTTPException(status_code=503, detail="LLM 服務尚未初始化。")
+        raise HTTPException(status_code=503, detail="LLM Service not initialized.")
     
+    # Prepend the system message to the conversation history
     full_messages = [{"role": "system", "content": system_message}]
     full_messages.extend(messages)
     
@@ -168,11 +150,13 @@ def get_inference_response(
             top_p=top_p,
         )
         
-        if response.get('choices') and response['choices'][0].get('message') and response['choices'][0]['message'].get('content'):
-            content = response['choices'][0]['message']['content']
+        # Safely extract the content
+        content = response.get('choices', [{}])[0].get('message', {}).get('content')
+        
+        if content:
             return content
         
-        return "⚠️ LLM 服務回傳空內容。"
+        return "⚠️ LLM service returned empty content."
 
     except Exception as e:
         print(f"[Error] LLM Inference failed: {e}")
@@ -182,27 +166,29 @@ def get_inference_response(
         )
 
 
-# --- 6. FastAPI 路由: / (健康檢查/首頁) ---
+# --- 6. FastAPI Routes ---
 
 @app.on_event("startup")
 async def startup_event():
-    """FastAPI 啟動時執行模型初始化"""
+    """Execute model initialization when FastAPI starts up."""
     try:
         initialize_llm()
     except Exception as e:
-        print(f"應用程式啟動失敗: {e}")
-        # 如果初始化失敗，LLM 實例為 None，推論會拋出 503 錯誤
+        print(f"Application startup failed: {e}")
+        # If initialization fails, LLM_INSTANCE is None, and inference will return 503.
 
-@app.get("/", summary="首頁/健康檢查")
+@app.get("/", summary="Home/Health Check")
 async def root():
     status = "running" if LLAMA_INSTANCE else "starting/failed (LLM unavailable)"
     return HTMLResponse(content=f"<html><body><h1>LLM API Status: {status}</h1></body></html>", status_code=200)
 
 
-# --- 7. FastAPI 路由: /infer4 (極簡版) ---
-
-@app.post("/infer4", summary="執行 LLM 推論 (v4: 極簡輸入/僅回傳 response 欄位)")
-async def infer4_endpoint(request: InferenceRequestMinimal):
+@app.post("/local/qwen-0-6b", summary="Execute Local LLM Inference (Minimal Input)")
+async def infer_local_endpoint(request: InferenceRequestMinimal):
+    """
+    Executes inference using the local Llama.cpp instance.
+    Returns a JSON with the 'response' field.
+    """
     FIXED_SYSTEM_MESSAGE = "You are a friendly and concise assistant."
     FIXED_MAX_TOKENS = 4096
 
@@ -215,22 +201,51 @@ async def infer4_endpoint(request: InferenceRequestMinimal):
             max_tokens=FIXED_MAX_TOKENS,
         )
         
-        return JSONResponse(content={
-            "response": content
-        })
+        return JSONResponse(content={"response": content})
 
-    except HTTPException as http_ex:
-        raise http_ex
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"[Fatal Error] During API call: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Internal Server Error."
+        print(f"[Fatal Error] During local API call: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error.")
+        
+
+@app.post("/remote/amd", summary="Call External AMD LLM Space via Gradio Client")
+async def infer_amd_endpoint(request: InferenceRequestMinimal):
+    """
+    Uses gradio_client to call the /chat API of the AMD_SPACE_ID.
+    Input/output format is consistent with the local endpoint.
+    """
+    try:
+        # Initialize Gradio Client using the global AMD_SPACE_ID
+        client = Client(AMD_SPACE_ID)
+
+        # Call the Space API
+        result = client.predict(
+            message=request.question,
+            system_prompt="You are a helpful assistant.",
+            temperature=0.7,
+            api_name="/chat"
         )
         
-        
-# --- 8. 啟動應用程式 ---
+        # Process and return result in the required format
+        if isinstance(result, str):
+            return JSONResponse(content={"response": result})
+        else:
+            raise ValueError("External API returned unexpected non-string format.")
 
+    except Exception as e:
+        print(f"[Fatal Error] Gradio Client API call failed: {e}")
+        # Return 503 Service Unavailable for external API errors
+        raise HTTPException(
+            status_code=503,
+            detail=f"External AMD LLM Service Error: {e}"
+        )
+
+        
+# --- 9. Application Startup ---
 if __name__ == "__main__":
-    print("FastAPI 服務正在啟動...")
+    print("FastAPI service is starting...")
+    # The 'app:app' structure tells uvicorn to look for the 'app' object 
+    # inside the current module (which is also named 'app' when run directly).
     uvicorn.run("app:app", host="0.0.0.0", port=7860, reload=False)
