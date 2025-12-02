@@ -7,7 +7,7 @@
 const char* ssid = "sun";      // Please modify here
 const char* password = "20001010";  // Please modify here
 //hsuwill000/ESP01LLMSample
-const char* apiUrl = "https://hsuwill000-ESP01LLMSample.hf.space/infer4";
+const char* apiUrl = "https://hsuwill000-ESP01LLMSample.hf.space/remote/amd";
 
 // Create a String buffer to store user input
 String inputBuffer = "";
