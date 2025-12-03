@@ -29,7 +29,7 @@ def install_required_modules():
     compile_env = os.environ.copy()
     compile_env["FORCE_CMAKE"] = "1"
     # Note: If your CPU does not support AVX512, this will cause a runtime error (Illegal instruction).
-    compile_env["CMAKE_ARGS"] = "-DLLAMA_AVX512=ON -DLLAMA_AVX512_VNNI=ON"
+    compile_env["CMAKE_ARGS"] = "-DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON -DGGML_AVX512_VBMI=ON  -DLLAMA_CURL=OFF"
     # ----------------------------------------------------
 
     print("--- Attempting Dynamic Installation/Upgrade (AVX-512 Compilation) ---")
