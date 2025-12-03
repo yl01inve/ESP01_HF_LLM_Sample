@@ -20,7 +20,7 @@ def install_required_modules():
     """
     required_packages = [
         "fastapi", "uvicorn", "pydantic", "huggingface-hub",
-        "llama-cpp-python", "gradio_client"
+        "git+https://github.com/abetlen/llama-cpp-python.git@main", "gradio_client"
     ]
     
     # ----------------------------------------------------
